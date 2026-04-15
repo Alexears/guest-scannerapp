@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Сканер гостей</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;font-family:Arial,sans-serif;background:#0f1115;color:#f3f4f6}
+.page{max-width:820px;margin:0 auto;padding:20px 16px 36px}
+.panel{background:#151922;border:1px solid #2b313b;border-radius:18px;padding:18px;margin-bottom:16px}
+h1{margin:0 0 14px;font-size:2rem}
+.title{font-size:1.05rem;margin-bottom:12px;color:#f3f4f6}
+.muted{color:#9ca3af;line-height:1.45}.ok{color:#7ee787}.warn{color:#f0b429}.error{color:#ff8a8a}
+#reader{width:100%;min-height:260px;border-radius:16px;overflow:hidden;border:1px solid #2b313b;background:#0f1115;padding:10px}
+.buttons,.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
+button{padding:12px 16px;border-radius:12px;border:1px solid #333;background:#1a1f27;color:#fff;cursor:pointer;font-size:1rem}
+button:hover{background:#222834}button:disabled{opacity:.55;cursor:not-allowed}
+input[type="text"],input[type="file"]{width:100%;padding:14px 16px;font-size:18px;border-radius:12px;border:1px solid #333;background:#0f1115;color:#fff}
+input::placeholder{color:#6b7280}
+.file-wrap label,.field label{display:block;margin-bottom:8px;color:#9ca3af;font-size:14px}
+.row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start;margin-top:14px}
+#scan-preview img{width:100%;max-height:58vh;object-fit:contain;margin-top:12px;border-radius:16px;border:1px solid #2b313b;background:#0f1115;display:block}
+.result-item{padding:12px 14px;border-radius:12px;border:1px solid #333;background:#0f1115;cursor:pointer;margin-top:8px}
+.result-item:hover{background:#1a1f27}
+.server-box{line-height:1.6}.camera-badge{margin-top:10px;color:#9ca3af;font-size:.95rem}
+@media (max-width:760px){.row{grid-template-columns:1fr}.page{padding:14px}input[type="text"],input[type="file"]{font-size:17px}}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="panel">
+    <h1>Сканер</h1>
+    <div id="reader"></div>
+    <div id="camera-info" class="camera-badge"></div>
+    <div class="buttons">
+      <button id="rescan-btn" style="display:none;">Новое сканирование</button>
+      <button id="switch-btn" style="display:none;">Сменить камеру</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="title">Результат сканирования</div>
+    <div id="scan-status" class="muted">Камера запускается автоматически. После успешного сканирования камера остановится.</div>
+    <div id="scan-preview"></div>
+    <div class="actions">
+      <button id="show-btn" style="display:none;">Вывести на экран</button>
+      <button id="clear-screen-btn">Убрать с экранов</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="title">Ручной поиск</div>
+    <div class="file-wrap">
+      <label for="excel-file">Excel файл (code, first_name, last_name)</label>
+      <input id="excel-file" type="file" accept=".xls,.xlsx">
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="first-name">Имя</label>
+        <input id="first-name" type="text" placeholder="Имя">
+      </div>
+      <div class="field">
+        <label for="last-name">Фамилия</label>
+        <input id="last-name" type="text" placeholder="Фамилия">
+      </div>
+      <div class="field">
+        <label for="code">Код</label>
+        <input id="code" type="text" placeholder="001">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="search-btn">Найти</button>
+      <button id="download-excel-btn">Скачать Excel с отметками</button>
+      <button id="reset-attendance-btn">Обнулить результаты прихода</button>
+    </div>
+    <div id="search-results"></div>
+  </div>
+
+  <div class="panel server-box">
+    <div class="title">Статус сервера</div>
+    <div>Статус связи: <strong id="server-status" class="warn">проверка...</strong></div>
+    <div>Последний скан: <strong id="last-scan-info">—</strong></div>
+    <div>Отмечено гостей: <strong id="attendance-count">0</strong></div>
+  </div>
+</div>
+
+<script>
+var guests = [], attendance = {}, selectedGuest = null, lastSeenScanAt = null;
+var excelInput = document.getElementById('excel-file');
+var firstNameEl = document.getElementById('first-name');
+var lastNameEl = document.getElementById('last-name');
+var codeEl = document.getElementById('code');
+var searchResultsEl = document.getElementById('search-results');
+var scanPreviewEl = document.getElementById('scan-preview');
+var scanStatusEl = document.getElementById('scan-status');
+var showBtn = document.getElementById('show-btn');
+var clearScreenBtn = document.getElementById('clear-screen-btn');
+var resetAttendanceBtn = document.getElementById('reset-attendance-btn');
+var downloadExcelBtn = document.getElementById('download-excel-btn');
+var serverStatusEl = document.getElementById('server-status');
+var lastScanInfoEl = document.getElementById('last-scan-info');
+var attendanceCountEl = document.getElementById('attendance-count');
+var cameraInfoEl = document.getElementById('camera-info');
+var rescanBtn = document.getElementById('rescan-btn');
+var switchBtn = document.getElementById('switch-btn');
+
+var html5QrCode = null, cameras = [], currentCameraIndex = 0, isScannerRunning = false, isProcessingScan = false;
+
+window.addEventListener('load', function(){ fetchAttendance(); autoStartScanner(); pollState(); setInterval(pollState,700); });
+
+excelInput.addEventListener('change', function(evt){
+  var file = evt.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e){
+    var data = new Uint8Array(e.target.result);
+    var wb = XLSX.read(data, {type:'array'});
+    var ws = wb.Sheets[wb.SheetNames[0]];
+    var rows = XLSX.utils.sheet_to_json(ws, {header:1});
+    var header = rows[0] || [], body = rows.slice(1);
+    var ci = header.indexOf('code'), fi = header.indexOf('first_name'), li = header.indexOf('last_name');
+    guests = body.map(function(r){
+      var code = String(r[ci] || '').trim();
+      if (code.length < 3) code = ('000' + code).slice(-3);
+      return {code: code, first_name: String(r[fi] || '').trim(), last_name: String(r[li] || '').trim()};
+    }).filter(function(g){ return g.code; });
+    scanStatusEl.className = 'ok';
+    scanStatusEl.textContent = 'Excel загружен. Гостей: ' + guests.length;
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+codeEl.addEventListener('input', function(){ if (codeEl.value.trim()) { firstNameEl.value=''; lastNameEl.value=''; } });
+firstNameEl.addEventListener('input', function(){ if (firstNameEl.value.trim()) codeEl.value=''; });
+lastNameEl.addEventListener('input', function(){ if (lastNameEl.value.trim()) codeEl.value=''; });
+
+document.getElementById('search-btn').addEventListener('click', function(){ runManualSearch(); });
+
+showBtn.addEventListener('click', function(){
+  if (!selectedGuest || !selectedGuest.code) return;
+  fetch('/api/select', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code:selectedGuest.code})})
+    .then(function(){ return fetch('/api/mark_attendance', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code:selectedGuest.code})}); })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if (data.shown_at) attendance[data.code] = data.shown_at;
+      updateAttendanceCount();
+      scanStatusEl.className = 'ok';
+      scanStatusEl.textContent = data.already_marked ? 'Карточка выведена. Гость уже был отмечен ранее.' : 'Карточка выведена. Гость отмечен как пришедший.';
+    });
+});
+
+clearScreenBtn.addEventListener('click', function(){
+  fetch('/api/select', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code:'000'})})
+    .then(function(){ scanStatusEl.className='muted'; scanStatusEl.textContent='На внешний экран отправлена заглушка 000.'; });
+});
+
+resetAttendanceBtn.addEventListener('click', function(){
+  if (!confirm('Точно обнулить все результаты прихода?')) return;
+  fetch('/api/reset_attendance', {method:'POST'})
+    .then(function(){ attendance={}; updateAttendanceCount(); scanStatusEl.className='warn'; scanStatusEl.textContent='Все результаты прихода обнулены.'; });
+});
+
+downloadExcelBtn.addEventListener('click', function(){
+  if (!guests.length) {
+    scanStatusEl.className='warn';
+    scanStatusEl.textContent='Сначала загрузите Excel файл.';
+    return;
+  }
+  var rows = [['code','first_name','last_name','shown_at']];
+  for (var i=0;i<guests.length;i++) {
+    var g = guests[i];
+    rows.push([g.code, g.first_name, g.last_name, attendance[g.code] || '']);
+  }
+  var wb = XLSX.utils.book_new();
+  var ws = XLSX.utils.aoa_to_sheet(rows);
+  XLSX.utils.book_append_sheet(wb, ws, 'attendance');
+  XLSX.writeFile(wb, 'guests_with_attendance.xlsx');
+});
+
+rescanBtn.addEventListener('click', function(){
+  isProcessingScan = false;
+  rescanBtn.style.display = 'none';
+  scanStatusEl.className = 'muted';
+  scanStatusEl.textContent = 'Повторный запуск сканера...';
+  autoStartScanner();
+});
+
+switchBtn.addEventListener('click', function(){
+  if (!cameras.length || !html5QrCode || !isScannerRunning) return;
+  switchBtn.disabled = true;
+  html5QrCode.stop().then(function(){
+    isScannerRunning = false;
+    currentCameraIndex = (currentCameraIndex + 1) % cameras.length;
+    startWithCurrentCamera();
+  }).catch(function(error){ switchBtn.disabled = false; showScannerError(error); });
+});
+
+function fetchAttendance() {
+  fetch('/api/attendance?t=' + Date.now(), {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(data){ attendance = data || {}; updateAttendanceCount(); });
+}
+
+function updateAttendanceCount() { attendanceCountEl.textContent = Object.keys(attendance).length; }
+
+function ensureSelected(guestOrCode) {
+  if (!guestOrCode) { selectedGuest = null; showBtn.style.display = 'none'; return; }
+  selectedGuest = typeof guestOrCode === 'string' ? {code: guestOrCode, first_name:'', last_name:''} : guestOrCode;
+  showBtn.style.display = 'inline-block';
+}
+
+function normalizeCode(value) {
+  var raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!/^[0-9]{1,3}$/.test(raw)) return '';
+  var code = raw.padStart(3, '0');
+  if (code < '001' || code > '999') return '';
+  return code;
+}
+
+function findByCode(code) {
+  for (var i=0;i<guests.length;i++) if (guests[i].code === code) return guests[i];
+  return null;
+}
+
+function renderPreview(code, fullName) {
+  ensureSelected(fullName ? findByCode(code) : code);
+  scanPreviewEl.innerHTML = (fullName ? '<div><strong>' + escapeHtml(fullName) + '</strong> — код ' + escapeHtml(code) + '</div>' : '<div><strong>Код: ' + escapeHtml(code) + '</strong></div>') +
+    '<img src="photos/' + escapeHtml(code) + '.jpg" alt="Карточка ' + escapeHtml(code) + '">' +
+    '<div class="muted" id="img-missing"></div>';
+  var img = scanPreviewEl.querySelector('img');
+  img.onerror = function() {
+    this.style.display = 'none';
+    var miss = document.getElementById('img-missing');
+    if (miss) miss.textContent = 'Картинка photos/' + code + '.jpg не найдена.';
+  };
+}
+
+function clearSearchResults() { searchResultsEl.innerHTML = ''; }
+function fillFields(g) { firstNameEl.value = g.first_name || ''; lastNameEl.value = g.last_name || ''; codeEl.value = g.code || ''; }
+
+function runManualSearch() {
+  clearSearchResults();
+  var code = normalizeCode(codeEl.value);
+  var first = firstNameEl.value.trim().toLowerCase();
+  var last = lastNameEl.value.trim().toLowerCase();
+
+  if (code) {
+    var guestByCode = findByCode(code);
+    if (guestByCode) {
+      fillFields(guestByCode);
+      renderPreview(guestByCode.code, guestByCode.first_name + ' ' + guestByCode.last_name);
+      scanStatusEl.className = 'ok';
+      scanStatusEl.textContent = 'Гость найден по коду: ' + code;
+    } else {
+      renderPreview(code, '');
+      scanStatusEl.className = 'warn';
+      scanStatusEl.textContent = 'Гостя в Excel не нашли, но карточка по коду показана.';
+    }
+    return;
+  }
+
+  if (!first && !last) {
+    scanStatusEl.className = 'warn';
+    scanStatusEl.textContent = 'Введите код или имя / фамилию для поиска.';
+    return;
+  }
+
+  var results = guests.filter(function(g){
+    var firstOk = !first || String(g.first_name).toLowerCase() === first;
+    var lastOk = !last || String(g.last_name).toLowerCase() === last;
+    return firstOk && lastOk;
+  });
+
+  if (results.length === 1) {
+    fillFields(results[0]);
+    renderPreview(results[0].code, results[0].first_name + ' ' + results[0].last_name);
+    scanStatusEl.className = 'ok';
+    scanStatusEl.textContent = 'Найден один гость.';
+  } else if (results.length > 1) {
+    scanStatusEl.className = 'warn';
+    scanStatusEl.textContent = 'Найдено несколько совпадений. Выберите гостя из списка.';
+    searchResultsEl.innerHTML = results.map(function(g){
+      return '<div class="result-item" data-code="' + escapeHtml(g.code) + '"><strong>' + escapeHtml(g.first_name + ' ' + g.last_name) + '</strong><br><span class="muted">Код: ' + escapeHtml(g.code) + '</span></div>';
+    }).join('');
+    var items = searchResultsEl.querySelectorAll('.result-item');
+    for (var i=0;i<items.length;i++) {
+      items[i].addEventListener('click', function(){
+        var code = this.getAttribute('data-code');
+        var guest = findByCode(code);
+        if (guest) {
+          fillFields(guest);
+          renderPreview(guest.code, guest.first_name + ' ' + guest.last_name);
+          clearSearchResults();
+          scanStatusEl.className = 'ok';
+          scanStatusEl.textContent = 'Гость выбран из списка.';
+        }
+      });
+    }
+  } else {
+    scanStatusEl.className = 'error';
+    scanStatusEl.textContent = 'Ничего не найдено.';
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function pollState() {
+  fetch('/api/state?t=' + Date.now(), {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(s){
+      serverStatusEl.textContent = 'сервер на связи';
+      serverStatusEl.className = 'ok';
+      if (s.last_scan) {
+        var when = s.last_scan_at ? new Date(s.last_scan_at).toLocaleTimeString() : '';
+        lastScanInfoEl.textContent = s.last_scan + (when ? ' • ' + when : '');
+      } else {
+        lastScanInfoEl.textContent = '—';
+      }
+      if (s.last_scan_at && s.last_scan_at !== lastSeenScanAt) {
+        lastSeenScanAt = s.last_scan_at;
+        var code = normalizeCode(s.last_scan || '');
+        if (!code) return;
+        var guest = findByCode(code);
+        if (guest) { fillFields(guest); renderPreview(guest.code, guest.first_name + ' ' + guest.last_name); }
+        else { firstNameEl.value=''; lastNameEl.value=''; codeEl.value=code; renderPreview(code, ''); }
+      }
+    })
+    .catch(function(){
+      serverStatusEl.textContent = 'нет связи с сервером';
+      serverStatusEl.className = 'warn';
+    });
+}
+
+function autoStartScanner() {
+  if (typeof Html5Qrcode === 'undefined') { showScannerError(new Error('Библиотека сканера не загрузилась.')); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { showScannerError(new Error('Браузер не поддерживает доступ к камере.')); return; }
+  if (isScannerRunning) return;
+  navigator.mediaDevices.getUserMedia({video:true,audio:false}).then(function(stream){
+    var tracks = stream.getTracks();
+    for (var i=0;i<tracks.length;i++) tracks[i].stop();
+    loadCamerasAndStart();
+  }).catch(function(error){ showScannerError(error); });
+}
+
+function loadCamerasAndStart() {
+  Html5Qrcode.getCameras().then(function(availableCameras){
+    if (!availableCameras || availableCameras.length === 0) throw new Error('Браузер не нашёл ни одной камеры.');
+    cameras = availableCameras;
+    currentCameraIndex = pickPreferredCameraIndex(cameras);
+    if (!html5QrCode) html5QrCode = new Html5Qrcode('reader');
+    startWithCurrentCamera();
+  }).catch(function(error){ showScannerError(error); });
+}
+
+function pickPreferredCameraIndex(list) {
+  var preferredIndex = 0;
+  for (var i=0;i<list.length;i++) {
+    var label = (list[i].label || '').toLowerCase();
+    if (label.indexOf('back') !== -1 || label.indexOf('rear') !== -1 || label.indexOf('environment') !== -1 || label.indexOf('зад') !== -1) {
+      preferredIndex = i; break;
+    }
+  }
+  return preferredIndex;
+}
+
+function startWithCurrentCamera() {
+  switchBtn.style.display = cameras.length > 1 ? 'inline-block' : 'none';
+  switchBtn.disabled = cameras.length <= 1;
+  rescanBtn.style.display = 'none';
+  var selectedCamera = cameras[currentCameraIndex];
+  cameraInfoEl.textContent = selectedCamera && selectedCamera.label ? 'Текущая камера: ' + selectedCamera.label : 'Текущая камера: #' + (currentCameraIndex + 1);
+  var config = {
+    fps: 10,
+    qrbox: {width: 250, height: 180},
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.CODE_128,
+      Html5QrcodeSupportedFormats.CODE_39,
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8,
+      Html5QrcodeSupportedFormats.UPC_A,
+      Html5QrcodeSupportedFormats.UPC_E,
+      Html5QrcodeSupportedFormats.ITF,
+      Html5QrcodeSupportedFormats.QR_CODE
+    ],
+    experimentalFeatures: { useBarCodeDetectorIfSupported: false }
+  };
+  html5QrCode.start(selectedCamera.id, config, function(decodedText){ submitScan(decodedText); }, function(){})
+    .then(function(){
+      isScannerRunning = true;
+      isProcessingScan = false;
+      scanStatusEl.className = 'muted';
+      scanStatusEl.textContent = 'Сканер активен. Наведите камеру на штрихкод.';
+    }).catch(function(error){ showScannerError(error); });
+}
+
+function submitScan(text) {
+  if (isProcessingScan) return;
+  var raw = String(text).trim();
+  if (!/^[0-9]{1,3}$/.test(raw)) return;
+  var code = raw.padStart(3, '0');
+  if (code < '001' || code > '999') return;
+  isProcessingScan = true;
+  fetch('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code: code})})
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if (html5QrCode && isScannerRunning) {
+        html5QrCode.stop().then(function(){ isScannerRunning = false; }).catch(function(){});
+      }
+      switchBtn.style.display = 'none';
+      rescanBtn.style.display = 'inline-block';
+      var guest = findByCode(code);
+      if (guest) { fillFields(guest); renderPreview(guest.code, guest.first_name + ' ' + guest.last_name); }
+      else { firstNameEl.value=''; lastNameEl.value=''; codeEl.value=code; renderPreview(code, ''); }
+      scanStatusEl.className = 'ok';
+      scanStatusEl.innerHTML = 'Успешно отсканировано: <strong>' + data.last_scan + '</strong>. Камера остановлена.';
+    }).catch(function(error){ showScannerError(error); });
+}
+
+function showScannerError(error) {
+  isScannerRunning = false;
+  isProcessingScan = false;
+  switchBtn.style.display = 'none';
+  var message = 'Сканер не запустился.';
+  if (error && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')) message += ' Разрешите доступ к камере.';
+  else if (error && error.message) message += ' ' + error.message;
+  scanStatusEl.className = 'error';
+  scanStatusEl.textContent = message;
+}
+</script>
+</body>
+</html>
